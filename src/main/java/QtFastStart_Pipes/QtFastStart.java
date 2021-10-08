@@ -21,16 +21,17 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
-package net.ypresto.qtfaststart;
+package QtFastStart_Pipes;
 
-import java.io.Closeable;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
+
+import QtFastStart_Pipes.ArtificialFileStream.BadFilePositionException;
+import QtFastStart_Pipes.ArtificialFileStream.BadFileSizeException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.channels.FileChannel;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 // Ported from qt-faststart.c, released in public domain.
 // I'll make this open source. :)
@@ -40,29 +41,7 @@ import java.nio.channels.FileChannel;
 public class QtFastStart {
     public static boolean sDEBUG = false;
 
-    public static void main(String[] args) {
-        sDEBUG = true;
-        if (args.length < 2) {
-            printf("input file and output file is required.");
-            System.exit(1);
-        }
-        try {
-            fastStart(new File(args[0]), new File(args[1]));
-        } catch (Throwable e) {
-            e.printStackTrace();
-            System.exit(1);
-        }
-    }
-
-    private static void safeClose(Closeable closeable) {
-        if (closeable != null) {
-            try {
-                closeable.close();
-            } catch (IOException e) {
-                printe(e, "Failed to close file: ");
-            }
-        }
-    }
+    
 
     /* package */
     static long uint32ToLong(int int32) {
@@ -108,23 +87,22 @@ public class QtFastStart {
         if (sDEBUG) System.err.println("QtFastStart: " + String.format(format, args));
     }
 
-    private static void printe(Throwable e, String format, Object... args) {
-        printf(format, args);
-        if (sDEBUG) e.printStackTrace();
+
+    private static ByteBuffer readAndFill(ArtificialFileStream infile, ByteBuffer buffer)/* throws IOException*/ {
+        buffer = buffer.clear();
+
+        buffer = infile.read(buffer);
+        buffer.flip();
+        return  buffer;
     }
 
-    private static boolean readAndFill(FileChannel infile, ByteBuffer buffer) throws IOException {
-        buffer.clear();
-        int size = infile.read(buffer);
+    private static ByteBuffer readAndFill(ArtificialFileStream infile, ByteBuffer buffer, long position) throws BadFilePositionException{
+        buffer = buffer.clear();
+        
+        buffer = infile.read(buffer, (int)position);
+        
         buffer.flip();
-        return size == buffer.capacity();
-    }
-
-    private static boolean readAndFill(FileChannel infile, ByteBuffer buffer, long position) throws IOException {
-        buffer.clear();
-        int size = infile.read(buffer, position);
-        buffer.flip();
-        return size == buffer.capacity();
+        return buffer;//size == buffer.capacity();
     }
 
     /* top level atoms */
@@ -146,31 +124,29 @@ public class QtFastStart {
     private static final int ATOM_PREAMBLE_SIZE = 8;
 
     /**
-     * @param in  Input file.
-     * @param out Output file.
-     * @return false if input file is already fast start.
+     * @param in  Input Stream.
+     * @return null if input file is already fast start, or byte array of the resulting output
      * @throws IOException
      */
-    public static boolean fastStart(File in, File out) throws IOException, MalformedFileException, UnsupportedFileException {
-        boolean ret = false;
-        FileInputStream inStream = null;
-        FileOutputStream outStream = null;
+    public static byte[] fastStart(InputStream in) throws IOException{
+        
+        byte[] ret = null;
+        ArtificialFileStream aStream;
+        
         try {
-            inStream = new FileInputStream(in);
-            FileChannel infile = inStream.getChannel();
-            outStream = new FileOutputStream(out);
-            FileChannel outfile = outStream.getChannel();
-            return ret = fastStartImpl(infile, outfile);
-        } finally {
-            safeClose(inStream);
-            safeClose(outStream);
-            if (!ret) {
-                out.delete();
-            }
+            
+            aStream = new ArtificialFileStream(in);
+            ret = fastStartImpl(aStream);
+        } catch (BadFileSizeException | MalformedFileException | UnsupportedFileException | BadFilePositionException ex) {
+            Logger.getLogger(QtFastStart.class.getName()).log(Level.SEVERE, null, ex);
         }
+            
+        in.close();
+        return ret;
+
     }
 
-    private static boolean fastStartImpl(FileChannel infile, FileChannel outfile) throws IOException, MalformedFileException, UnsupportedFileException {
+    private static byte[] fastStartImpl(ArtificialFileStream in) throws MalformedFileException, UnsupportedFileException, BadFilePositionException {
         ByteBuffer atomBytes = ByteBuffer.allocate(ATOM_PREAMBLE_SIZE).order(ByteOrder.BIG_ENDIAN);
         int atomType = 0;
         long atomSize = 0; // uint64_t
@@ -179,10 +155,15 @@ public class QtFastStart {
         ByteBuffer ftypAtom = null;
         // uint64_t, but assuming it is in int32 range. It is reasonable as int max is around 2GB. Such large moov is unlikely, yet unallocatable :).
         int moovAtomSize;
-        long startOffset = 0;
+        int startOffset = 0;
+        
+        ArtificialFileStream outStream = new ArtificialFileStream();
+        
 
         // traverse through the atoms in the file to make sure that 'moov' is at the end
-        while (readAndFill(infile, atomBytes)) {
+        int orig = atomBytes.capacity();
+        atomBytes = readAndFill(in, atomBytes);
+        while (orig == atomBytes.limit()) {
             atomSize = uint32ToLong(atomBytes.getInt()); // uint32
             atomType = atomBytes.getInt(); // representing uint32_t in signed int
 
@@ -192,18 +173,24 @@ public class QtFastStart {
                 ftypAtom = ByteBuffer.allocate(ftypAtomSize).order(ByteOrder.BIG_ENDIAN);
                 atomBytes.rewind();
                 ftypAtom.put(atomBytes);
-                if (infile.read(ftypAtom) < ftypAtomSize - ATOM_PREAMBLE_SIZE) break;
+                
+                ftypAtom = in.read(ftypAtom);
+                if (ftypAtom.capacity() < ftypAtomSize - ATOM_PREAMBLE_SIZE) 
+                    break;
                 ftypAtom.flip();
-                startOffset = infile.position(); // after ftyp atom
+                startOffset = in.position(); // after ftyp atom
             } else {
                 if (atomSize == 1) {
                     /* 64-bit special case */
                     atomBytes.clear();
-                    if (!readAndFill(infile, atomBytes)) break;
+                    
+                    atomBytes = readAndFill(in, atomBytes);
+                    if (orig != atomBytes.capacity()) 
+                        break;
                     atomSize = uint64ToLong(atomBytes.getLong()); // XXX: assume in range of int64_t
-                    infile.position(infile.position() + atomSize - ATOM_PREAMBLE_SIZE * 2); // seek
+                    in.position(in.position() + (int)atomSize - ATOM_PREAMBLE_SIZE * 2); // seek
                 } else {
-                    infile.position(infile.position() + atomSize - ATOM_PREAMBLE_SIZE); // seek
+                    in.position(in.position() + (int)atomSize - ATOM_PREAMBLE_SIZE); // seek
                 }
             }
             if (sDEBUG) printf("%c%c%c%c %10d %d",
@@ -211,7 +198,7 @@ public class QtFastStart {
                     (atomType >> 16) & 255,
                     (atomType >> 8) & 255,
                     (atomType >> 0) & 255,
-                    infile.position() - atomSize,
+                    in.position() - atomSize,
                     atomSize);
             if ((atomType != FREE_ATOM)
                     && (atomType != JUNK_ATOM)
@@ -223,7 +210,8 @@ public class QtFastStart {
                     && (atomType != PICT_ATOM)
                     && (atomType != UUID_ATOM)
                     && (atomType != FTYP_ATOM)) {
-                printf("encountered non-QT top-level atom (is this a QuickTime file?)");
+                if(sDEBUG)
+                    printf("encountered non-QT top-level atom (is this a QuickTime file?)");
                 break;
             }
 
@@ -232,11 +220,15 @@ public class QtFastStart {
          * able to continue scanning sensibly after this atom, so break. */
             if (atomSize < 8)
                 break;
+        
+        atomBytes = readAndFill(in, atomBytes);
+        
         }
 
         if (atomType != MOOV_ATOM) {
-            printf("last atom in file was not a moov atom");
-            return false;
+            if(sDEBUG) 
+                printf("last atom in file was not a moov atom");
+            return null;
         }
 
         // moov atom was, in fact, the last atom in the chunk; load the whole moov atom
@@ -244,9 +236,12 @@ public class QtFastStart {
         // atomSize is uint64, but for moov uint32 should be stored.
         // XXX: assuming moov atomSize <= max vaue of int32
         moovAtomSize = uint32ToInt(atomSize);
-        lastOffset = infile.size() - moovAtomSize; // NOTE: assuming no extra data after moov, as qt-faststart.c
+        lastOffset = in.size() - moovAtomSize; // NOTE: assuming no extra data after moov, as qt-faststart.c
         moovAtom = ByteBuffer.allocate(moovAtomSize).order(ByteOrder.BIG_ENDIAN);
-        if (!readAndFill(infile, moovAtom, lastOffset)) {
+        
+        orig = moovAtom.capacity();
+        moovAtom = readAndFill(in, moovAtom, lastOffset);
+        if (orig != moovAtom.capacity()) {
             throw new MalformedFileException("failed to read moov atom");
         }
 
@@ -274,7 +269,10 @@ public class QtFastStart {
             // uint32_t, but assuming moovAtomSize is in int32 range, so this will be in int32 range
             int offsetCount = uint32ToInt(moovAtom.getInt());
             if (atomType == STCO_ATOM) {
-                printf("patching stco atom...");
+                
+                if(sDEBUG)
+                    printf("patching stco atom...");
+                
                 if (moovAtom.remaining() < offsetCount * 4) {
                     throw new MalformedFileException("bad atom size/element count");
                 }
@@ -290,7 +288,9 @@ public class QtFastStart {
                     moovAtom.putInt(newOffset);
                 }
             } else if (atomType == CO64_ATOM) {
-                printf("patching co64 atom...");
+                
+                if(sDEBUG)
+                    printf("patching co64 atom...");
                 if (moovAtom.remaining() < offsetCount * 8) {
                     throw new MalformedFileException("bad atom size/element count");
                 }
@@ -301,25 +301,28 @@ public class QtFastStart {
             }
         }
 
-        infile.position(startOffset); // seek after ftyp atom
+        in.position(startOffset); // seek after ftyp atom
 
         if (ftypAtom != null) {
             // dump the same ftyp atom
-            printf("writing ftyp atom...");
+            if(sDEBUG)
+                printf("writing ftyp atom...");
             ftypAtom.rewind();
-            outfile.write(ftypAtom);
+            outStream.write(ftypAtom);
         }
 
         // dump the new moov atom
-        printf("writing moov atom...");
+        if(sDEBUG)
+            printf("writing moov atom...");
         moovAtom.rewind();
-        outfile.write(moovAtom);
+        outStream.write(moovAtom);
 
         // copy the remainder of the infile, from offset 0 -> (lastOffset - startOffset) - 1
-        printf("copying rest of file...");
-        infile.transferTo(startOffset, lastOffset - startOffset, outfile);
+        if(sDEBUG)
+            printf("copying rest of file...");
+        in.transferTo(startOffset, (int)(lastOffset - startOffset), outStream);
 
-        return true;
+        return outStream.getByteArray();
     }
 
     public static class QtFastStartException extends Exception {
@@ -339,4 +342,8 @@ public class QtFastStart {
             super(detailMessage);
         }
     }
+    
+
+    
+    
 }
