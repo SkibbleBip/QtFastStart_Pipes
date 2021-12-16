@@ -125,7 +125,7 @@ public class QtFastStart {
 
     /**
      * @param in  Input Stream.
-     * @return null if input file is already fast start, or byte array of the resulting output
+     * @return input stream if input file is already fast start, or byte array of the resulting output
      * @throws IOException
      */
     public static byte[] fastStart(InputStream in) throws IOException{
@@ -145,6 +145,26 @@ public class QtFastStart {
         return ret;
 
     }
+    /**
+     * @param in byte array.
+     * @return input bytes if input file is already fast start, or byte array of the resulting output
+     * @throws IOException
+     */
+    public static byte[] fastStart(byte[] in) throws IOException{
+        
+        byte[] ret = null;
+        ArtificialFileStream aStream;
+        
+        aStream = new ArtificialFileStream(in);
+        try {
+            ret = fastStartImpl(aStream);
+        } catch (MalformedFileException | UnsupportedFileException | BadFilePositionException ex) {
+            Logger.getLogger(QtFastStart.class.getName()).log(Level.SEVERE, null, ex);
+        }
+        
+        return ret;
+    
+    }    
 
     private static byte[] fastStartImpl(ArtificialFileStream in) throws MalformedFileException, UnsupportedFileException, BadFilePositionException {
         ByteBuffer atomBytes = ByteBuffer.allocate(ATOM_PREAMBLE_SIZE).order(ByteOrder.BIG_ENDIAN);
@@ -228,7 +248,7 @@ public class QtFastStart {
         if (atomType != MOOV_ATOM) {
             if(sDEBUG) 
                 printf("last atom in file was not a moov atom");
-            return null;
+            return in.getByteArray();
         }
 
         // moov atom was, in fact, the last atom in the chunk; load the whole moov atom
